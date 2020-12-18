@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+
+readonly VERSION='1.0.0'
+
+error() {
+  echo -e "\033[31m$*\033[m" >&2
+}
+
+case $1 in
+  --version )
+    echo $VERSION
+    exit 0
+    ;;
+
+  --help )
+    man git-make-changelog
+    exit 0
+    ;;
+esac
+
+tags=`git tag`
+if [[ -n "$1" ]]; then
+  if [[ -n "$tags" ]]; then
+    tags+="\n"
+  fi
+  tags+="$1"
+fi
+if [ -z "$tags" ]; then
+  error "No tags"
+  exit 1
+fi
+tags=`echo -e "$tags" | sed 's/$/-_/' | sort -V | sed 's/-_$//'`
+
+readonly REMOTE=`git remote -v | grep -E "^origin\t" | head -n 1 | awk '{print $2}' || git remote -v | head -n 1 | awk '{print $2}'`
+
+if [[ -z "$REMOTE" ]]; then
+  error "No remote"
+  exit 1
+fi
+
+if [[ "$REMOTE" =~ "git@" ]]; then
+  readonly URL_BASE=`echo $REMOTE | sed 's!:!/!' | sed 's!git@!https://!' | sed 's/\.git$//'`
+else
+  readonly URL_BASE=`echo $REMOTE | sed 's/\.git$//'`
+fi
+
+if [[ "$URL_BASE" =~ "https://github.com" ]]; then
+  readonly IS_GITHUB=true
+  readonly IS_BITBUCKET=false
+  readonly URL_COMMIT="$URL_BASE/commit/"
+  readonly URL_ISSUE="$URL_BASE/issues/"
+  readonly URL_PR="$URL_BASE/pull/"
+  readonly URL_COMPARE="$URL_BASE/compare/"
+  readonly URL_TAG="$URL_BASE/releases/tag/"
+  readonly COMPARE_FRAGMENT=""
+  readonly COMPARE_DOTS="..."
+  readonly USER=`echo $URL_BASE | awk -F'/' '{print $4}'`
+elif [[ "$URL_BASE" =~ "https://bitbucket.org" ]]; then
+  readonly IS_GITHUB=false
+  readonly IS_BITBUCKET=true
+  readonly URL_COMMIT="$URL_BASE/commits/"
+  readonly URL_ISSUE="$URL_BASE/issues/"
+  readonly URL_PR="$URL_BASE/pull-requests/"
+  readonly URL_COMPARE="$URL_BASE/compare/"
+  readonly URL_TAG="$URL_BASE/src/"
+  readonly COMPARE_FRAGMENT="#diff"
+  readonly COMPARE_DOTS=".."
+else
+  error "Do not support $REMOTE"
+  exit 1
+fi
+
+cat << EOS
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+EOS
+
+while read tag
+do
+  [[ "$tag" = "$1" ]] && is_vtag=true || is_vtag=false
+
+  if $is_vtag; then
+    if $IS_GITHUB; then
+      message="from $USER/`git rev-parse --abbrev-ref HEAD`"
+      if [[ -n "$2" ]]; then
+        message="Merge pull request #$2 $message"
+      fi
+      messages="xxxxxx $message"
+    elif $IS_BITBUCKET; then
+      message="Merged in `git rev-parse --abbrev-ref HEAD`"
+      if [[ -n "$2" ]]; then
+        message="$message (pull request #$2)"
+      fi
+      messages="xxxxxx $message"
+    fi
+
+    if [[ -z "`git tag`" ]]; then
+      messages+="\n`git log --merges --oneline`"
+    fi
+  else
+    if [[ -n "$prev" ]]; then
+      messages=`git log $prev..$tag --merges --oneline | tail -n +2`
+    else
+      initial_commit_hash=`git log --oneline | tail -n 1 | awk '{print $1}'`
+      messages=`git log $initial_commit_hash..$tag --merges --oneline | tail -n +2`
+    fi
+  fi
+
+  if $is_vtag; then
+    tag_or_hash=`git rev-parse HEAD`
+  else
+    tag_or_hash=$tag
+  fi
+  date=`git show --date=short $tag_or_hash | grep -E "^Date: " | tail -n 1 | cut -c 9-`
+  histories="## [$tag] - $date\n"
+
+  while read message
+  do
+    commit_hash=`echo $message | sed -E "s!^([^ ]+)(.+)!\1!"`
+    if [[ "$commit_hash" = "xxxxxx" ]]; then
+      unset commit_hash_link
+    else
+      commit_hash_link="[$commit_hash]($URL_COMMIT$commit_hash)"
+    fi
+    if $IS_GITHUB; then
+      if [[ "$message" =~ "Merge branch '" ]]; then
+        continue
+      fi
+      if [[ -n `echo $message | grep -E "from $USER/feature/#([0-9]+)"` ]]; then
+        issue_link=`echo $message | sed -E "s!(.+)from $USER/feature/#([0-9]+)(.+)!Issue [#\2]($URL_ISSUE\2)!"`
+      else
+        unset issue_link
+      fi
+      if [[ -n `echo $message | grep -E 'Merge pull request #([0-9]+)'` ]]; then
+        pr_link=`echo $message | sed -E "s!(.+)Merge pull request #([0-9]+)(.+)!PR [#\2]($URL_PR\2)!"`
+      else
+        unset pr_link
+      fi
+      if [[ -n "$issue_link" ]]; then
+        message=`echo $message | sed -E "s!(.+)$USER/feature/#([0-9]+)-(.+)!\3!"`
+      else
+        message=`echo $message | sed -E "s!(.+)$USER.+/(.+)!\2!"`
+      fi
+      message=${message//-/ }
+    elif $IS_BITBUCKET; then
+      if [[ -z `echo $message | grep -E 'Merged in [^/]+/'` ]]; then
+        continue
+      fi
+      if [[ -n `echo $message | grep -E '/#[0-9]+-'` ]]; then
+        issue_link=`echo $message | sed -E "s!(.+)Merged in feature/#([0-9]+)(.+)!Issue [#\2]($URL_ISSUE\2)!"`
+      else
+        unset issue_link
+      fi
+      if [[ -n `echo $message | grep -E '\(pull request #([0-9]+)\)'` ]]; then
+        pr_link=`echo $message | sed -E "s!(.+)\(pull request #([0-9]+)\)! PR [#\2]($URL_PR\2)!"`
+      else
+        unset pr_link
+      fi
+      if [[ -n "$issue_link" ]]; then
+        message=`echo $message | sed -E 's!(.+)feature/#[0-9]+-([^ ]+)(.+)!\2!'`
+      else
+        message=`echo $message | sed -E 's!(.+)feature/([^ ]+)(.+)!\2!'`
+      fi
+      message=${message//-/ }
+    fi
+
+    if [[ -n "$message" ]]; then
+      histories+="- $message\n"
+      if [[ -n "$commit_hash_link" ]]; then
+        sub_message=$commit_hash_link
+      else
+        sub_message=""
+      fi
+      if [[ -n "$issue_link" ]]; then
+        if [[ -n "$sub_message" ]]; then
+          sub_message+=", "
+        fi
+        sub_message+="$issue_link"
+      fi
+      if [[ -n "$pr_link" ]]; then
+        if [[ -n "$sub_message" ]]; then
+          sub_message+=", "
+        fi
+        sub_message+="$pr_link"
+      fi
+      if [[ -n "$sub_message" ]]; then
+        histories+="    - $sub_message\n"
+      fi
+    fi
+  done < <(echo -e "$messages")
+
+  log="$histories$log"
+  prev=$tag
+done < <(echo -e "$tags")
+
+IFS=$'\n'
+while read line
+do
+  if [[ -z "$line" ]]; then
+    continue
+  fi
+
+  if [[ "$line" =~ "## [" ]]; then
+    echo ""
+    n=0
+  else
+    if [[ $n -eq 0 ]]; then
+      echo ""
+    fi
+    let ++n
+  fi
+  echo $line
+done < <(echo -e "$log")
+unset IFS
+
+echo ""
+
+from=(`echo -e "$tags" | sed 's/$/-_/' | sort -rV | sed 's/-_$//'`)
+to=(HEAD ${from[*]})
+
+for ((i=0; i<${#to[@]}; i++))
+do
+  f=${from[$i]}
+  t=${to[$i]}
+
+  if [[ "$t" = "HEAD" ]]; then
+    ref=Unreleased
+  else
+    ref=$t
+  fi
+
+  if [[ -n "$f" ]]; then
+    if $IS_GITHUB; then
+      echo "[$ref]: $URL_COMPARE$f$COMPARE_DOTS$t$COMPARE_FRAGMENT"
+    elif $IS_BITBUCKET; then
+      echo "[$ref]: $URL_COMPARE$t$COMPARE_DOTS$f$COMPARE_FRAGMENT"
+    fi
+  else
+    echo "[$ref]: $URL_TAG$t"
+  fi
+done

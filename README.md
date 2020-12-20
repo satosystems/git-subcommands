@@ -25,6 +25,7 @@ The program is installed at `/usr/local/bin`, and the manual is installed at `/u
 
 ## Sub commands
 
+- [git-all-rebase](git-all-rebase/README.md)
 - [git-make-changelog](git-make-changelog/README.md)
 
 ## Dependencies
